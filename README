@@ -1,3 +1,4 @@
+运筹学课程作业。
 该项目尝试使用python复现《Hybrid Time Formulation for Diesel Blending and Distribution Scheduling论文
-论文原文如20.pdf文件所示
-由于没有条件使用商业求解器，因此使用开源求解器进行求解
+论文原文如20.pdf文件所示。
+由于没有条件使用商业求解器，因此使用开源求解器进行求解。
