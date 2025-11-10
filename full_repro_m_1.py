@@ -171,6 +171,13 @@ def build_full_model(data):
 
     # Helper: indicator that pipeline j is active in slot s (any product)
     model.P_active = Var(model.J, model.S, within=Binary)
+    # Quality relaxation slacks (Path B): sulfur upper-bound slack and cetane lower-bound slack
+    model.S_sulfur_slack = Var(model.J, model.P, model.S, within=NonNegativeReals)
+    model.S_cetane_slack = Var(model.J, model.P, model.S, within=NonNegativeReals)
+    # Demand shortfall slack (Path B): unmet demand per (j,p,d)
+    model.Short = Var(model.J, model.P, model.D, within=NonNegativeReals)
+    # Inventory lower-bound slack (Path B, optional): allow VD to go below Vmin with penalty
+    model.InvSlack = Var(model.I, model.D, within=NonNegativeReals)
 
     # OBJECTIVE components accumulate
     # raw material & pump cost: per unit VTP * (Crm+Cp)
@@ -182,7 +189,16 @@ def build_full_model(data):
         trans_cost = sum(Ct.get((p,pp),0)*m.TR[j,p,pp,s] for j in m.J for p in m.P for pp in m.P for s in m.S if s < max(m.S))
         # small penalty on empty washing to discourage waste (optional)
         wash_pen = 0.01*sum(m.W[j,p,s] for j in m.J for p in m.P for s in m.S)
-        return raw_pump + trans_cost + wash_pen
+        # heavy penalties on quality slacks to obtain feasible solution with minimal spec violation
+        PEN_SULFUR = 1e6
+        PEN_CETANE = 1e6
+        PEN_SHORT = 1e6
+        PEN_INV = 1e6
+        qual_pen = PEN_SULFUR*sum(m.S_sulfur_slack[j,p,s] for j in m.J for p in m.P for s in m.S) \
+                 + PEN_CETANE*sum(m.S_cetane_slack[j,p,s] for j in m.J for p in m.P for s in m.S)
+        short_pen = PEN_SHORT*sum(m.Short[j,p,d] for j in m.J for p in m.P for d in m.D)
+        inv_pen = PEN_INV*sum(m.InvSlack[i,d] for i in m.I for d in m.D)
+        return raw_pump + trans_cost + wash_pen + qual_pen + short_pen + inv_pen
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
     # ------------------ CONSTRAINTS ------------------
@@ -276,7 +292,7 @@ def build_full_model(data):
         req = data['demand'].get((j,p,d),0)
         if req <= 0:
             return Constraint.Skip  # Skip constraints for zero demand
-        return sum(m.VPP[j,p,s] for s in s_indices) >= req
+        return sum(m.VPP[j,p,s] for s in s_indices) + m.Short[j,p,d] >= req
     model.demand_constr = Constraint(model.demand_idx, rule=demand_constr)
 
     # I) Tank inventory balance end-of-day
@@ -290,9 +306,13 @@ def build_full_model(data):
             return m.VD[i,d] == m.VD[i,d-1] + inflow - outflow
     model.tank_balance = Constraint(model.I, model.D, rule=tank_balance)
 
-    def tank_bounds(m,i,d):
-        return inequality(Vmin[i], m.VD[i,d], Vmax[i])
-    model.tank_bounds = Constraint(model.I, model.D, rule=tank_bounds)
+    # Replace bounds with separate lower/upper, lower relaxed by InvSlack
+    def tank_lower(m,i,d):
+        return m.VD[i,d] + m.InvSlack[i,d] >= Vmin[i]
+    model.tank_lower = Constraint(model.I, model.D, rule=tank_lower)
+    def tank_upper(m,i,d):
+        return m.VD[i,d] <= Vmax[i]
+    model.tank_upper = Constraint(model.I, model.D, rule=tank_upper)
 
     # J) Start/finish linking constraints and minimum duration (for pipelines and tanks)
     # If Ys(i,j,s)=1 then TP_s <= TP_f and min duration enforced: TP_f - TP_s >= MH * Ys
@@ -379,6 +399,26 @@ def build_full_model(data):
     # P) Prevent washing while pipeline inactive: if W indicates wash slots, allow W only when P_active==1 (or allowed). For simplicity allow W always.
 
     # Q) Non-negativity, integrality are handled by Var definitions
+
+    # R) Product quality constraints with slacks (Path B, per M1 Eq. (5) style pool-side mixing)
+    #    For each pipeline j, product p, slot s, if Z[j,p,s]=1:
+    #      sum_i sulfur_i * VTP[i,j,s] <= S_spec[p] * sum_i VTP[i,j,s] + S_sulfur_slack[j,p,s]
+    #      sum_i cetane_i * VTP[i,j,s] + S_cetane_slack[j,p,s] >= CET_spec[p] * sum_i VTP[i,j,s]
+    #    Use big-M to deactivate when Z[j,p,s]=0.
+    Sspec = data['prod_specs']
+    def sulfur_quality(m,j,p,s):
+        vt_sum = sum(m.VTP[i,j,s] for i in m.I)
+        lhs = sum(data['tanks'][i]['sulfur'] * m.VTP[i,j,s] for i in m.I)
+        rhs = Sspec[p]['sulfur'] * vt_sum + m.S_sulfur_slack[j,p,s] + BIGV*(1 - m.Z[j,p,s])
+        return lhs <= rhs
+    model.sulfur_quality = Constraint(model.J, model.P, model.S, rule=sulfur_quality)
+
+    def cetane_quality(m,j,p,s):
+        vt_sum = sum(m.VTP[i,j,s] for i in m.I)
+        lhs = sum(data['tanks'][i]['cetane'] * m.VTP[i,j,s] for i in m.I) + m.S_cetane_slack[j,p,s]
+        rhs = Sspec[p]['cetane'] * vt_sum - BIGV*(1 - m.Z[j,p,s])
+        return lhs >= rhs
+    model.cetane_quality = Constraint(model.J, model.P, model.S, rule=cetane_quality)
 
     return model
 
