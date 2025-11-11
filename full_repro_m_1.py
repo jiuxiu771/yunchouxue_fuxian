@@ -479,6 +479,16 @@ def diagnose_model(model, data):
 # ----------------------------- solve & postprocess -----------------------------
 def solve_and_report(model, data, solver_name='cbc'):
     solver = SolverFactory(solver_name)
+    # Configure CBC options if using CBC
+    if solver_name.lower() == 'cbc':
+        # time limit (seconds)
+        solver.options['seconds'] = 3600
+        # stop when relative MIP gap <= 5%
+        solver.options['ratioGap'] = 0.05
+        # node limit
+        solver.options['maxNodes'] = 5000000
+        # enable heuristics
+        solver.options['heuristicsOnOff'] = 'on'
     print('Using solver:', solver_name)
     res = solver.solve(model, tee=True)
     print('Solver status:', res.solver.status, res.solver.termination_condition)
